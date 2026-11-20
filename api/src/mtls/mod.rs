@@ -41,11 +41,6 @@ use tracing::{info, warn};
 
 static ACTIVE: OnceLock<Arc<RotatingSvid>> = OnceLock::new();
 
-/// The process-wide rotating identity, once [`init`] has enabled it.
-pub fn active() -> Option<&'static Arc<RotatingSvid>> {
-    ACTIVE.get()
-}
-
 /// A `reqwest` client presenting the current SVID, if mTLS is enabled.
 pub fn http_client() -> Option<reqwest::Client> {
     ACTIVE.get().map(|rotating| (*rotating.http()).clone())
@@ -85,7 +80,7 @@ pub fn init(shutdown: watch::Receiver<bool>) -> Option<Arc<RotatingSvid>> {
 
     let spiffe_id = rotating
         .material()
-        .map(|material| material.spiffe_id)
+        .map(|material| material.spiffe_id.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let _ = ACTIVE.set(Arc::clone(&rotating));
     info!(%spiffe_id, "inter-service mTLS enabled with the SPIFFE X.509 SVID");

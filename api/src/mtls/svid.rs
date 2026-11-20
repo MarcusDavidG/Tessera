@@ -144,10 +144,6 @@ impl SvidSource {
         Some(Self::new(path, spiffe_id))
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// Read the current SVID files.
     pub fn load(&self) -> Result<Arc<SvidMaterial>, SvidError> {
         let cert_chain = read(&self.dir.join("tls.crt"))?;

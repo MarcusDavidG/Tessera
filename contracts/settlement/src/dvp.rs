@@ -329,7 +329,7 @@ pub(crate) fn net_settle(env: &Env, instruction_ids: &Vec<u32>) -> u32 {
         let mut debtors: Vec<Position> = Vec::new(env);
         let mut creditors: Vec<Position> = Vec::new(env);
         for ((net_token, account), net) in nets.iter() {
-            if &net_token != &token || net == 0 {
+            if net_token != token || net == 0 {
                 continue;
             }
             if net < 0 {
