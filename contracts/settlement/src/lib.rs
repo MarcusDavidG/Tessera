@@ -24,11 +24,15 @@
 #![no_std]
 
 mod batch_settler;
+mod dvp;
 
+#[cfg(test)]
+mod dvp_test;
 #[cfg(test)]
 mod test;
 
 pub use batch_settler::{AssetPolicy, TradeLeg, MAX_LEGS};
+pub use dvp::{InstructionStatus, SettlementInstruction, MAX_NET_INSTRUCTIONS};
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -66,6 +70,24 @@ pub enum Error {
     /// The token's compliance contract rejected a leg's recipient.
     RecipientNotCompliant = 13,
     Overflow = 14,
+    /// No settlement instruction exists with that id.
+    InstructionNotFound = 15,
+    /// The instruction has already been settled.
+    InstructionNotPending = 16,
+    /// The current ledger is before the instruction's settlement ledger.
+    SettlementNotDue = 17,
+    /// Only the buyer or the seller of an instruction may settle it.
+    NotSettlementParty = 18,
+    /// The instruction names a settlement ledger before the current one.
+    InvalidSettlementLedger = 19,
+    /// The same instruction id appears twice in one netting set.
+    DuplicateInstruction = 20,
+    /// The settlement guarantee fund has not been configured.
+    GuaranteeNotConfigured = 21,
+    /// The shortfall exceeds the fund's `max_guarantee_amount`.
+    GuaranteeLimitExceeded = 22,
+    /// The fund's reserve for the payment asset cannot cover the shortfall.
+    GuaranteeInsufficient = 23,
 }
 
 #[derive(Clone)]
@@ -76,6 +98,16 @@ pub(crate) enum DataKey {
     Asset(Address),
     /// Number of batches settled so far; the next batch's id.
     BatchCount,
+    /// Number of DvP settlement instructions created; the next id.
+    InstructionCount,
+    /// A DvP settlement instruction by id.
+    Instruction(u32),
+    /// Admin-configured cap on a single guarantee-fund advance.
+    GuaranteeMax,
+    /// Guarantee-fund reserve held by the contract, per token.
+    GuaranteeReserve(Address),
+    /// What a buyer owes the guarantee fund, per token.
+    GuaranteeClaim(Address, Address),
 }
 
 #[contract]
@@ -161,6 +193,88 @@ impl SettlementContract {
         batch_settler::validate(&env, &trade_legs);
     }
 
+    // -----------------------------------------------------------------
+    // T+0 delivery-versus-payment instructions (issue #390)
+    // -----------------------------------------------------------------
+
+    /// Create a settlement instruction signed by both counterparties. The
+    /// seller will deliver `amount` of `asset`; the buyer will pay
+    /// `payment_amount` of `payment_asset`; it becomes settleable on
+    /// `settlement_ledger`. Returns the instruction id.
+    pub fn create_instruction(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        asset: Address,
+        amount: i128,
+        payment_asset: Address,
+        payment_amount: i128,
+        settlement_ledger: u32,
+    ) -> u32 {
+        Self::ensure_active(&env);
+        dvp::create_instruction(
+            &env,
+            &buyer,
+            &seller,
+            &asset,
+            amount,
+            &payment_asset,
+            payment_amount,
+            settlement_ledger,
+        )
+    }
+
+    /// Atomically settle one due instruction: asset from seller to buyer and
+    /// payment from buyer to seller in the same invocation. Either party may
+    /// call it. Returns the amount the guarantee fund advanced (0 if none).
+    pub fn settle(env: Env, caller: Address, instruction_id: u32) -> i128 {
+        Self::ensure_active(&env);
+        dvp::settle(&env, &caller, instruction_id)
+    }
+
+    /// Net-settle a set of due instructions with the fewest transfers.
+    /// Returns the number of transfers executed. Every account whose net
+    /// position is negative must have authorized the call.
+    pub fn net_settle(env: Env, instruction_ids: Vec<u32>) -> u32 {
+        Self::ensure_active(&env);
+        dvp::net_settle(&env, &instruction_ids)
+    }
+
+    pub fn get_instruction(env: Env, instruction_id: u32) -> SettlementInstruction {
+        dvp::instruction(&env, instruction_id)
+    }
+
+    pub fn instruction_count(env: Env) -> u32 {
+        dvp::instruction_count(&env)
+    }
+
+    /// Set the largest shortfall the guarantee fund may cover per settlement.
+    pub fn configure_guarantee_fund(env: Env, admin: Address, max_guarantee_amount: i128) {
+        dvp::configure_guarantee_fund(&env, &admin, max_guarantee_amount);
+    }
+
+    /// Deposit `amount` of `token` into the guarantee reserve.
+    pub fn deposit_guarantee(env: Env, admin: Address, token: Address, amount: i128) {
+        dvp::deposit_guarantee(&env, &admin, &token, amount);
+    }
+
+    /// Repay part of what the fund advanced on `buyer`'s behalf.
+    pub fn repay_guarantee(env: Env, buyer: Address, token: Address, amount: i128) {
+        dvp::repay_guarantee(&env, &buyer, &token, amount);
+    }
+
+    pub fn guarantee_max(env: Env) -> i128 {
+        dvp::guarantee_max(&env)
+    }
+
+    pub fn guarantee_reserve(env: Env, token: Address) -> i128 {
+        dvp::guarantee_reserve(&env, &token)
+    }
+
+    pub fn guarantee_claim(env: Env, buyer: Address, token: Address) -> i128 {
+        dvp::guarantee_claim(&env, &buyer, &token)
+    }
+
     pub fn batch_count(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -183,7 +297,18 @@ impl SettlementContract {
         tessera_common::upgrade(&env, new_wasm_hash);
     }
 
-    fn require_admin(env: &Env, admin: &Address) {
+    fn ensure_active(env: &Env) {
+        if tessera_common::is_paused(env) {
+            panic_with_error!(env, Error::Paused);
+        }
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(env, Error::NotInitialized);
+        }
+    }
+}
+
+impl SettlementContract {
+    pub(crate) fn require_admin(env: &Env, admin: &Address) {
         let stored: Address = env
             .storage()
             .instance()

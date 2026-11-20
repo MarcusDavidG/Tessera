@@ -1,0 +1,74 @@
+# Workload registration entries (issue #394).
+#
+# Every service gets exactly one SPIFFE ID:
+#
+#   spiffe://tessera.io/ns/prod/sa/<service-name>
+#
+# SPIRE registration entries are per agent (per node), so the Job enumerates
+# the attested agents and creates one child entry per agent/service pair. It is
+# idempotent: existing entries for the same SPIFFE ID are skipped, so re-running
+# it after a rollout only adds entries for newly joined nodes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spire-registration-entries
+  namespace: spire
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: spire-registration-entries
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: register
+          image: ghcr.io/spiffe/spire-server:1.9.4
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              SOCKET=/run/spire/sockets/server.sock
+              NAMESPACE=prod
+              SERVICES="tessera-api tessera-indexer tessera-mpc-signer tessera-channel-node"
+              SOCKET_DIR=$(dirname "$SOCKET")
+
+              for i in $(seq 1 60); do
+                if [ -S "$SOCKET" ] && spire-server healthcheck -socketPath "$SOCKET" >/dev/null 2>&1; then
+                  break
+                fi
+                echo "waiting for SPIRE server socket ($i/60)"
+                sleep 5
+              done
+
+              AGENTS=$(spire-server agent list -socketPath "$SOCKET" -output json | jq -r '.[].spiffe_id')
+              if [ -z "$AGENTS" ]; then
+                echo "no attested agents yet; re-run after the DaemonSet registers" >&2
+                exit 1
+              fi
+
+              for agent in $AGENTS; do
+                for service in $SERVICES; do
+                  spiffe_id="spiffe://tessera.io/ns/$NAMESPACE/sa/$service"
+                  if spire-server entry show -socketPath "$SOCKET" -spiffeID "$spiffe_id" -parentID "$agent" 2>/dev/null | grep -q "Entry ID"; then
+                    echo "exists: $spiffe_id (agent $agent)"
+                    continue
+                  fi
+                  spire-server entry create -socketPath "$SOCKET" \
+                    -parentID "$agent" \
+                    -spiffeID "$spiffe_id" \
+                    -selector "k8s:ns:$NAMESPACE" \
+                    -selector "k8s:sa:$service"
+                  echo "created: $spiffe_id (agent $agent)"
+                done
+              done
+          volumeMounts:
+            - name: spire-sockets
+              mountPath: /run/spire/sockets
+              readOnly: false
+      volumes:
+        - name: spire-sockets
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory

@@ -1,0 +1,25 @@
+# Tessera — PostgreSQL settings required for the 5-minute RPO target
+# (issue #393). Include from postgresql.conf, or apply through the parameter
+# group / Cloud SQL flags used by the deployment.
+#
+# `archive_timeout` is what actually bounds the RPO: without it an idle
+# database keeps a WAL segment open until it fills, which can take far longer
+# than five minutes. With it, a segment is archived at least every 300 s.
+
+wal_level = replica
+archive_mode = on
+
+# pgBackRest pushes the completed segment; --archive-async keeps the commit
+# path free of repository latency.
+archive_command = 'pgbackrest --stanza=tessera archive-push %p'
+archive_timeout = 300
+
+# The standby restores with `pgbackrest restore --type=immediate`, so it needs
+# enough WAL senders/workers to catch up quickly after promotion.
+max_wal_senders = 10
+wal_keep_size = 1GB
+
+# Streaming replication to the warm standby (optional: pgBackRest handles
+# catch-up, streaming keeps the standby close enough to promote in seconds).
+hot_standby = on
+hot_standby_feedback = on

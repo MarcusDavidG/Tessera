@@ -148,7 +148,10 @@ impl RpcClient {
             })
             .collect();
         RpcClient {
-            http: reqwest::Client::new(),
+            // Issue #394: use the SPIFFE-backed client when the workload has
+            // an SVID; the public RPC endpoint is not affected because client
+            // certificates are only sent when the server asks for one.
+            http: crate::mtls::http_client().unwrap_or_default(),
             endpoints: Arc::new(Mutex::new(endpoints)),
             source,
         }

@@ -28,6 +28,7 @@ mod healthcheck;
 mod indexer;
 mod middleware;
 mod models;
+mod mtls;
 mod routes;
 mod services;
 pub mod storage;
@@ -100,6 +101,11 @@ async fn main() {
     // by the indexer's poll loop so it stops issuing new refresh cycles
     // once the process is terminating, rather than racing shutdown.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Issue #394: load the workload's SPIFFE X.509 SVID before any database
+    // pool or HTTP client is built, so both use it as their client
+    // certificate. Without an SVID mount this is a no-op.
+    let _mtls = mtls::init(shutdown_rx.clone());
 
     // Issue #159: only the elected leader polls Soroban RPC.
     state.node_role = cluster::leader_election::spawn(

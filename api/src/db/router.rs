@@ -217,7 +217,11 @@ fn parse_url(var: &'static str, url: &str) -> Result<PgConnectOptions, DbConfigE
     if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
         return Err(DbConfigError::Scheme(var));
     }
-    PgConnectOptions::from_str(url).map_err(|e| DbConfigError::Url(var, e))
+    let options = PgConnectOptions::from_str(url).map_err(|e| DbConfigError::Url(var, e))?;
+    // Issue #394: when SPIFFE identity is configured, present the workload's
+    // X.509 SVID to PostgreSQL and verify the server against the SPIFFE trust
+    // bundle. Without it the URL's own TLS settings are left untouched.
+    Ok(crate::mtls::postgres_tls(options.clone()).unwrap_or(options))
 }
 
 /// Whether a hot standby can run `sql` (see [`DbRouter::route`]). A single

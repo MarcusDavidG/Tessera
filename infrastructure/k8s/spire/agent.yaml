@@ -1,0 +1,158 @@
+# SPIRE agent DaemonSet (issue #394).
+#
+# One agent per node, attesting the node with k8s_psat and exposing the
+# Workload API at /run/spire/sockets/agent.sock. Workloads mount the SPIFFE CSI
+# driver volume (csi.spiffe.io) to receive their SVID files at /svids.
+#
+# Prerequisite: the SPIFFE CSI driver DaemonSet
+# (https://github.com/spiffe/spiffe-csi) installed cluster-wide.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-agent
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-agent
+subjects:
+  - kind: ServiceAccount
+    name: spire-agent
+    namespace: spire
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-agent
+  namespace: spire
+data:
+  agent.conf: |
+    agent {
+      data_dir = "/run/spire/agent"
+      log_level = "INFO"
+      server_address = "spire-server.spire.svc.cluster.local"
+      server_port = "8081"
+      trust_bundle_path = "/run/spire/bundle/bundle.crt"
+      trust_domain = "tessera.io"
+      socket_path = "/run/spire/sockets/agent.sock"
+    }
+
+    plugins {
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          cluster = "tessera"
+        }
+      }
+
+      KeyManager "disk" {
+        plugin_data {
+          directory = "/run/spire/agent"
+        }
+      }
+
+      WorkloadAttestor "k8s" {
+        plugin_data {
+          # Resolves pod -> service account labels for registration entries.
+          skip_verify = false
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent
+  namespace: spire
+spec:
+  selector:
+    matchLabels:
+      app: spire-agent
+  template:
+    metadata:
+      labels:
+        app: spire-agent
+    spec:
+      serviceAccountName: spire-agent
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: spire-agent
+          image: ghcr.io/spiffe/spire-agent:1.9.4
+          args: ["-config", "/run/spire/config/agent.conf"]
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: spire-config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: spire-bundle
+              mountPath: /run/spire/bundle
+              readOnly: true
+            - name: spire-agent-sockets
+              mountPath: /run/spire/sockets
+              readOnly: false
+            - name: spire-agent-data
+              mountPath: /run/spire/agent
+            - name: kubelet-pki
+              mountPath: /var/lib/kubelet/pki
+              readOnly: true
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      volumes:
+        - name: spire-config
+          configMap:
+            name: spire-agent
+        - name: spire-bundle
+          configMap:
+            name: spire-bundle
+        - name: spire-agent-sockets
+          hostPath:
+            path: /run/spire/sockets
+            type: DirectoryOrCreate
+        - name: spire-agent-data
+          hostPath:
+            path: /run/spire/agent
+            type: DirectoryOrCreate
+        - name: kubelet-pki
+          hostPath:
+            path: /var/lib/kubelet/pki
+        - name: host-proc
+          hostPath:
+            path: /proc
+---
+# Bootstrap trust bundle. The server's k8sbundle Notifier replaces this with
+# the real upstream bundle once the server is running; agents retry until it
+# is populated.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-bundle
+  namespace: spire
+data:
+  bundle.crt: ""

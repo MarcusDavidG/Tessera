@@ -1,0 +1,41 @@
+# Tessera DR failover worker (issue #393).
+#
+#   npx wrangler kv namespace create DR_STATE     # fill in the id below
+#   npx wrangler deploy
+#
+# Secrets (never in this file):
+#   npx wrangler secret put CF_API_TOKEN      # Load Balancer pool edit permission
+#   npx wrangler secret put DR_ADMIN_TOKEN    # manual /failover and /failback
+
+name = "tessera-dr-failover"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+workers_dev = true
+
+[durable_objects]
+bindings = [
+  { name = "HEALTH_MONITOR", class_name = "HealthMonitor" },
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["HealthMonitor"]
+
+[[kv_namespaces]]
+binding = "DR_STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Every minute: re-arm the 30 s probe alarm and reconcile the pool weights
+# from KV. The probe cadence itself is owned by the Durable Object alarm.
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+PRIMARY_HEALTH_URL = "https://api.tessera.xyz/health"
+STANDBY_HEALTH_URL = "https://standby-api.tessera.xyz/health"
+FAILURE_THRESHOLD = "2"
+RECOVERY_THRESHOLD = "3"
+PROBE_TIMEOUT_MS = "5000"
+# Cloudflare Load Balancer pool whose origin weights are flipped.
+CF_ACCOUNT_ID = ""
+CF_POOL_ID = ""

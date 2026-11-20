@@ -67,3 +67,16 @@ variable "next_public_api_base_url" {
   type        = string
   description = "Public API URL for Docs"
 }
+
+variable "enable_warm_standby" {
+  type        = bool
+  description = "Run the read-only warm-standby API for disaster recovery (issue #393)"
+  default     = false
+}
+
+variable "replica_database_url" {
+  type        = string
+  description = "Cross-region read replica connection URL used by the warm standby"
+  sensitive   = true
+  default     = ""
+}

@@ -64,6 +64,35 @@ resource "aws_lb_target_group" "docs" {
   })
 }
 
+# DR warm-standby Target Group (issue #393)
+#
+# Kept separate from the primary API group so the warm standby can be health
+# checked without receiving production traffic. The Cloudflare failover worker
+# flips the load-balancer origin weights to this group's endpoint.
+resource "aws_lb_target_group" "standby_api" {
+  name        = "${var.project_name}-${var.environment}-dr-api-tg"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = "/health"
+    port                = "8080"
+    protocol            = "HTTP"
+    interval            = 15
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.project_name}-${var.environment}-dr-api-tg"
+  })
+}
+
 # HTTP Listener (Port 80)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn

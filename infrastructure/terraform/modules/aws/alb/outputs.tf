@@ -27,3 +27,8 @@ output "docs_target_group_arn" {
   description = "ARN of the Docs Target Group"
   value       = aws_lb_target_group.docs.arn
 }
+
+output "standby_api_target_group_arn" {
+  description = "ARN of the DR warm-standby API Target Group"
+  value       = aws_lb_target_group.standby_api.arn
+}

@@ -1,0 +1,118 @@
+name: Weekly DR Drill
+
+on:
+  schedule:
+    # Mondays at 03:00 UTC
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the plan without creating the standby"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dr-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    name: Warm standby restore, RTO/RPO measurement
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      DR_MODE: pgbackrest
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      RTO_TARGET_SECONDS: "900"
+      RPO_TARGET_SECONDS: "300"
+      STANDBY_TERRAFORM_DIR: infrastructure/terraform/environments/prod
+      STANDBY_TERRAFORM_TARGET: module.warm_standby
+      STANDBY_API_URL: ${{ secrets.DR_STANDBY_API_URL }}
+      PGBACKREST_STANZA: ${{ secrets.DR_PGBACKREST_STANZA || 'tessera' }}
+      PGBACKREST_CONFIG: /etc/pgbackrest/pgbackrest.conf
+      PGBACKREST_REPO: ${{ secrets.DR_PGBACKREST_REPO || 'repo1' }}
+      WAL_ARCHIVE_PROVIDER: ${{ secrets.DR_WAL_ARCHIVE_PROVIDER || 's3' }}
+      WAL_ARCHIVE_BUCKET: ${{ secrets.DR_BACKUP_BUCKET }}
+      WAL_ARCHIVE_PREFIX: ${{ secrets.DR_WAL_ARCHIVE_PREFIX || 'tessera/archive' }}
+      PAGERDUTY_ROUTING_KEY: ${{ secrets.DR_PAGERDUTY_ROUTING_KEY }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DR_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Install pgBackRest and clients
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends pgbackrest postgresql-client jq curl
+          pgbackrest version
+          psql --version
+
+      - name: Write pgBackRest configuration
+        env:
+          PGBACKREST_REPO1_CIPHER_PASS: ${{ secrets.DR_PGBACKREST_CIPHER_PASS }}
+          PGBACKREST_REPO1_S3_KEY: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
+          PGBACKREST_REPO1_S3_KEY_SECRET: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          sudo mkdir -p /etc/pgbackrest /var/spool/pgbackrest /var/log/pgbackrest
+          sudo chown -R "$(id -u):$(id -g)" /var/spool/pgbackrest /var/log/pgbackrest
+          sed "s#<from PGBACKREST_REPO1_CIPHER_PASS>#${PGBACKREST_REPO1_CIPHER_PASS:-}#" \
+            infrastructure/dr/pgbackrest.conf | sudo tee /etc/pgbackrest/pgbackrest.conf >/dev/null
+          sudo chmod 600 /etc/pgbackrest/pgbackrest.conf
+
+      - name: Terraform init
+        working-directory: infrastructure/terraform/environments/prod
+        run: terraform init -input=false
+
+      - name: Run weekly DR drill
+        run: |
+          chmod +x infrastructure/dr/restore_verification.sh infrastructure/scripts/dr_test.sh
+          infrastructure/dr/restore_verification.sh
+
+      - name: Upload drill report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-drill-${{ github.run_number }}
+          path: infrastructure/dr/drill-results/
+          retention-days: 365
+
+      - name: Job summary
+        if: always()
+        run: |
+          latest="$(ls -1t infrastructure/dr/drill-results/*.json 2>/dev/null | head -1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No drill report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Weekly DR drill"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Result | $(jq -r .result "$latest") |"
+            echo "| RTO (s) | $(jq -r '.rto.measured_seconds // "unknown"' "$latest") |"
+            echo "| RTO target (s) | $(jq -r '.rto.target_seconds' "$latest") |"
+            echo "| RPO (s) | $(jq -r '.rpo.measured_seconds // "unknown"' "$latest") |"
+            echo "| RPO target (s) | $(jq -r '.rpo.target_seconds' "$latest") |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -121,3 +121,27 @@ module "database" {
   max_acu                    = 16.0
   instance_count             = 2 # Multi-AZ HA
 }
+
+# 9. Warm-standby API for multi-cloud DR (issue #393)
+#
+# Disabled by default; the weekly drill enables it with
+# `terraform apply -target=module.warm_standby -var enable_warm_standby=true`.
+module "warm_standby" {
+  source = "../../modules/aws/warm-standby"
+  count  = var.enable_warm_standby ? 1 : 0
+
+  project_name           = var.project_name
+  environment            = "prod"
+  aws_region             = var.aws_region
+  private_subnet_ids     = module.vpc.private_subnet_ids
+  security_group_ids     = [module.security_groups.ecs_security_group_id]
+  execution_role_arn     = module.iam.ecs_task_execution_role_arn
+  task_role_arn          = module.iam.ecs_task_role_arn
+  api_image              = var.api_image
+  replica_database_url   = var.replica_database_url
+  soroban_rpc_url        = var.soroban_rpc_url
+  registry_id            = var.registry_id
+  dividend_id            = var.dividend_id
+  desired_count          = 1
+  target_group_arn       = module.alb.standby_api_target_group_arn
+}
